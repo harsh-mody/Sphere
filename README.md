@@ -108,6 +108,8 @@ For spatial range queries, iterate only over quantized buckets in the wedge — 
 
 ## Comparison with Existing Data Structures
 
+### General Structures
+
 | Structure | Lookup | Spatial Range | Insert | Space | Natural Shape | Best For |
 |---|---|---|---|---|---|---|
 | **Sphere (this)** | **O(1)** | **O(k)** | **O(1)** | **O(n + B)** | Spherical/Circular | Radial maps, signal propagation, radar |
@@ -117,30 +119,114 @@ For spatial range queries, iterate only over quantized buckets in the wedge — 
 | R-Tree | O(log n) | O(log n + k) | O(log n) | O(n) | Rectangles | Geographic bounding boxes |
 | Quad Tree | O(log n) | O(log n + k) | O(log n) | O(n log n) | Square tiles | 2D region subdivision |
 | Oct Tree | O(log n) | O(log n + k) | O(log n) | O(n log n) | Cubic voxels | 3D volumetric scenes |
-| Geohash | O(1) | O(k·neighbors) | O(1) | O(n · L) | Grid on sphere | Proximity on Earth's surface |
-| Skip List | O(log n) | O(log n + k) | O(log n) | O(n log n) | Linear | Ordered sequences |
+| Geohash | O(1) | O(k·neighbors) | O(1) | O(n · L) | Grid on sphere | Proximity on Earth’s surface |
 | B-Tree | O(log n) | O(log n + k) | O(log n) | O(n) | Sorted pages | Database indexes |
 
-**Space complexity notes:**
-- `n` = number of nodes, `k` = number of results returned, `E` = number of edges, `B` = number of allocated buckets in the coordinate hash (depends on `resolution` and `shell_step`), `L` = geohash string length (typically 12 bytes per entry)
-- **Sphere O(n + B)**: Each node takes O(1) in the hash index (one entry per node = O(n)). The bucket count `B` is bounded by `(r_max / shell_step) × (360 / resolution) × (180 / resolution)`. For sparse data, B can exceed n — the primary trade-off vs. pure O(n) structures.
-- **Quad/Oct Tree O(n log n)**: Internal branching nodes are allocated even for empty space; a tree of depth `d` over `n` points uses O(n·d) = O(n log n) nodes in the worst case.
-- **Skip List O(n log n)**: Each element is duplicated across O(log n) levels on average.
-- **Geohash O(n · L)**: Stores a fixed-length string key per node; constant per node but with a larger constant than a 3-integer tuple.
+`n` = nodes, `k` = results, `E` = edges, `B` = allocated hash buckets `(r_max/shell_step) × (360/res) × (180/res)`, `L` = geohash string length
+
+**Space notes:** Quad/Oct Trees allocate internal branching nodes for empty space → O(n log n). Geohash pays a larger constant per key (string vs. 3-integer tuple). Sphere’s B can exceed n for sparse data — the main space trade-off.
+
+---
+
+### Sphere-Specific Structures
+
+| Structure | Lookup | Spatial Range | Insert | Space | Pole Distortion | Radial Depth | Best For |
+|---|---|---|---|---|---|---|---|
+| **Sphere (this)** | **O(1)** | **O(k)** | **O(1)** | **O(n + B)** | Yes (fixed Δθ) | Native (shells) | Radial queries, maps, radar, sensor data |
+| Sphere Quadtree (SQT) | O(log n) | O(log n + k) | O(log n) | O(n) | No (icosahedron) | None | Multi-resolution surface rendering |
+| Spherepix | O(1) patch | O(patches) | O(1) | O(n · P) | No (orthogonal patches) | None | Convolution & image processing on sphere |
+| Sphere Hierarchy (BVH) | O(log n) | O(log n + k) | O(log n) | O(n) | No | None | Collision detection, ray tracing |
+| 3D K-d Tree (lat/lon) | O(log n) | O(√n) | O(log n) | O(n) | No (Cartesian embed) | None | General nearest-neighbor on globe |
+
+`P` = patch overlap factor (Spherepix), typically 3–5×
+
+---
+
+### Head-to-Head: Sphere vs. Each Sphere-Specific Structure
+
+**vs. Sphere Quadtree (SQT)**
+
+SQT subdivides an icosahedron recursively so every cell has roughly equal area — no pole distortion. Lookup and insert are both O(log n) (tree traversal to the right triangle).
+
+| Dimension | Sphere | SQT |
+|---|---|---|
+| Lookup | **O(1)** | O(log n) |
+| Insert | **O(1)** | O(log n) |
+| Space | O(n + B) | **O(n)** |
+| Pole distortion | Yes (fixed Δθ buckets) | **No** |
+| Radial depth (3D) | **Native shells** | Surface only |
+| Multi-resolution | Manual (shell_step) | **Built-in** |
+
+**Use Sphere when** you have 3D radial data (radar, sonar, GPS). **Use SQT when** you are rendering or tessellating a surface and equal-area cells matter (globe visualisation, climate grids).
+
+---
+
+**vs. Spherepix**
+
+Spherepix tiles the sphere with overlapping near-orthogonal patches so standard 2D convolution kernels can run without seam artefacts. It is a signal-processing primitive, not a general spatial index.
+
+| Dimension | Sphere | Spherepix |
+|---|---|---|
+| Lookup | **O(1)** | O(1) patch, then linear within patch |
+| Space | **O(n + B)** | O(n · P) — overlap inflates storage |
+| Arbitrary queries | **Yes** | No — patch-aligned only |
+| Convolution support | No | **Yes** |
+| Graph topology | **Yes (edges)** | No |
+
+**Use Sphere when** you need arbitrary spatial queries, routing, or graph traversal. **Use Spherepix when** you are running CNNs or filter operations over spherical image data.
+
+---
+
+**vs. Sphere Hierarchy (BVH)**
+
+A BVH wraps geometry in nested bounding spheres. It answers “does ray R hit object X?” efficiently by pruning whole subtrees whose bounding sphere misses. Nodes are not addressable by coordinate — only by containment.
+
+| Dimension | Sphere | BVH |
+|---|---|---|
+| Coordinate lookup | **O(1)** | Not supported |
+| Ray / containment query | O(n) | **O(log n)** |
+| Insert | **O(1)** | O(log n) rebalance |
+| Dynamic updates | **O(1)** | Expensive (tree rebuild) |
+| Space | **O(n + B)** | O(n) |
+| Use case | Spatial indexing | **Collision / ray tracing** |
+
+**Use Sphere when** nodes are addressed by position and updated frequently (live sensor feeds, moving agents). **Use BVH when** you are testing ray intersections against static or semi-static geometry.
+
+---
+
+**vs. 3D K-d Tree (lat/lon embedded in Cartesian)**
+
+A 3D K-d tree converts (lat, lon) to (x, y, z) on a unit sphere and applies standard Cartesian nearest-neighbour search. This removes pole distortion but loses all angular/radial semantics.
+
+| Dimension | Sphere | 3D K-d Tree |
+|---|---|---|
+| Exact coordinate lookup | **O(1)** | O(log n) |
+| Nearest neighbour | O(n) fallback¹ | **O(log n)** |
+| Radial ring scan | **O(k)** direct | O(√n) |
+| Cone / wedge scan | **O(k)** direct | O(√n) — no angular awareness |
+| Bearing / angular queries | **Native** | Requires inverse trig post-filter |
+| Space | O(n + B) | **O(n)** |
+| Pole distortion | Yes (bucket skew) | **No** |
+
+¹ Sphere’s `nearest()` does O(1) exact hit first; only falls back to O(n) scan on a miss. A bucketed ANN variant (check surrounding buckets) reduces this to O(1) average.
+
+**Use Sphere when** queries are phrased in angular/radial terms (bearing, range, cone). **Use 3D K-d Tree when** queries are purely distance-based and data has no radial structure.
+
+---
 
 ### Where Sphere Wins
 
-- **Radial lookup beats K-d and R-Tree** when coordinates are naturally polar (GPS, radar, sonar). K-d/R-Tree add log-factor overhead from tree traversal that Sphere avoids with direct hashing.
-- **Beats Geohash for directional queries** — Geohash encodes proximity poorly across cell boundaries at cardinal edges. Sphere's angle-bucket design handles wrap-around at 0°/360° cleanly.
-- **Beats plain graphs for spatial routing** — Graphs have no spatial locality; adjacent-angle neighbors require edge traversal. Sphere's index makes "what is 10° to my left at this range?" a direct O(1) lookup.
-- **Space-competitive with trees for dense polar data** — When data fills many shells uniformly (radar sweeps, LIDAR point clouds), `B ≈ n` and Sphere matches O(n) tree space while beating their O(log n) query time.
+- **O(1) lookup** — no tree traversal; every sphere-specific structure above pays O(log n).
+- **Native radial semantics** — ring scans, cone scans, and radial paths are first-class operations, not post-filtered approximations.
+- **O(1) dynamic updates** — BVH and K-d Trees require O(log n) rebalancing; Sphere inserts and deletes in constant time, making it the best choice for high-frequency live data.
+- **Graph topology included** — edges with angular offsets let Sphere double as a spatial graph; none of the sphere-specific structures support this.
 
 ### Where Sphere Has Trade-offs
 
-- **Sparse data inflates B** — If data clusters in one sector, the hash still allocates buckets proportional to the angular/radial resolution across the whole sphere. Tune `resolution` and `shell_step` to the actual data density.
-- **Resolution sensitivity** — Bucket size `resolution` must be chosen carefully; too coarse loses precision, too fine degrades to sparse hash and wastes space.
-- **Curved-surface distortion** — At high latitudes on a globe, fixed `Δθ` steps cover less physical distance. Adaptive shell weighting (`Δx = r·sin(φ)·Δθ`) compensates.
-
+- **Pole bucket skew** — fixed Δθ buckets are denser near the poles. SQT and 3D K-d Trees avoid this entirely.
+- **Nearest-neighbour fallback** — without an ANN extension, a coordinate miss degrades to O(n). K-d Trees give guaranteed O(log n) NN.
+- **Surface-only tasks** — for rendering, convolution, or ray tracing on a pure spherical surface, SQT, Spherepix, and BVH are purpose-built and more efficient.
+- **Sparse data inflates B** — bucket count grows with resolution, not data density. Tune `shell_step` and `resolution` to match actual data distribution.
 ---
 
 ## Use Cases
